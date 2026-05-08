@@ -6,6 +6,10 @@ import { initFileLoader, handleFiles } from './data/file-loader.js'
 import { registerTable, deleteTable, activateTable, buildMeta } from './data/table-store.js'
 import { showToast } from './ui/toast.js'
 import { OPERATIONS, OP_CATEGORIES } from './operations/registry.js'
+import {
+  initCanvasPhase2, placeCanvasNode, executeGraphFrom,
+  openInspector, closeInspector, renderAllP2Nodes
+} from './canvas-p2.js'
 
 async function init() {
   await initSession()
@@ -27,8 +31,25 @@ async function init() {
   renderTableList()
   renderPreview()
   renderPipelineBar()
+
+  // ── Phase 2 bootstrap ──────────────────────────────────────────────────
+  if (!state.graph) state.graph = { nodes: {}, edges: [] }
+
+  // Expose modal helpers for canvas-p2.js
+  window._buildModalBody    = buildModalBody
+  window._bindModalEvents   = bindModalEvents
+  window._buildConfigFromForm = buildConfigFromForm
+  window._openModalForCanvas  = openModalForCanvas
+
+  initCanvasPhase2()
+  // ──────────────────────────────────────────────────────────────────────
+
   console.log('[Meridian Bridge v2] Ready')
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Toolbar
+// ─────────────────────────────────────────────────────────────────────────────
 
 function initToolbar() {
   const nav = document.getElementById('topbar-nav')
@@ -60,7 +81,27 @@ function setMode(mode) {
   document.getElementById('canvas-mode-view').style.display = mode === 'canvas' ? 'flex' : 'none'
   document.getElementById('mode-table-btn').classList.toggle('active', mode === 'table')
   document.getElementById('mode-canvas-btn').classList.toggle('active', mode === 'canvas')
-  if (mode === 'canvas') renderCanvas()
+  if (mode === 'canvas') {
+    renderAllP2Nodes()       // Phase 2: render graph nodes
+    updateCanvasEmptyState() // update hint text
+  }
+}
+
+// Expose for canvas-p2.js hook
+window._setMode = setMode
+
+function updateCanvasEmptyState() {
+  const empty = document.getElementById('canvas-empty')
+  if (!empty) return
+  const hasNodes = Object.keys(state.graph?.nodes || {}).length > 0
+  const hasTables = Object.keys(state.tables || {}).length > 0
+  empty.style.display = hasNodes ? 'none' : 'flex'
+  const sub = empty.querySelector('.empty-sub')
+  if (sub) {
+    sub.innerHTML = hasTables
+      ? 'Drag a <strong style="color:var(--accent)">table</strong> from the left panel or an <strong style="color:var(--accent)">operation</strong> from the right panel onto the canvas to start building.'
+      : 'Load data first — upload a CSV/Excel file or click "Load demo data". Then drag tables and operations here.'
+  }
 }
 
 function toggleTheme() {
@@ -69,6 +110,10 @@ function toggleTheme() {
   document.getElementById('theme-btn').textContent = state.ui.theme === 'dark' ? '☾' : '☀'
   localStorage.setItem('bridge_theme', state.ui.theme)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Table list
+// ─────────────────────────────────────────────────────────────────────────────
 
 function renderTableList() {
   const list  = document.getElementById('table-list')
@@ -79,7 +124,7 @@ function renderTableList() {
   if (!names.length) { list.innerHTML = ''; return }
   list.innerHTML = names.map(n => {
     const m = state.tablesMeta[n] || {}
-    return `<div class="table-item ${n === state.ui.activeTable ? 'active' : ''}" data-name="${n}">
+    return `<div class="table-item ${n === state.ui.activeTable ? 'active' : ''}" data-name="${n}" draggable="true">
       <div class="table-icon">${m.isResult ? '\u229e' : '\ud83d\udccb'}</div>
       <div class="table-info">
         <div class="table-name" title="${n}">${n}</div>
@@ -94,14 +139,26 @@ function renderTableList() {
     el.addEventListener('click', e => {
       if (e.target.closest('.del-btn')) return
       activateTable(el.dataset.name)
-      state.pipeline = []; state.history = []
+      // Only reset pipeline when switching to a source table, not a result
+      if (!state.tablesMeta[el.dataset.name]?.isResult) {
+        state.pipeline = []; state.history = []
+      }
       renderPipelineBar()
+    })
+    // Phase 2: table drag data
+    el.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/x-table', el.dataset.name)
+      e.dataTransfer.effectAllowed = 'copy'
     })
   })
   list.querySelectorAll('.del-btn').forEach(btn => {
     btn.addEventListener('click', e => { e.stopPropagation(); deleteTable(btn.dataset.del) })
   })
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preview
+// ─────────────────────────────────────────────────────────────────────────────
 
 let sortCol = null, sortDir = 1, searchQuery = '', displayPage = 0
 const PAGE = 500
@@ -189,6 +246,10 @@ function renderPreview() {
   })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pipeline bar (table mode)
+// ─────────────────────────────────────────────────────────────────────────────
+
 function renderPipelineBar() {
   const bar = document.getElementById('pipeline-bar')
   if (!bar) return
@@ -213,8 +274,11 @@ function rebuildFromPipeline() {
   let data = [...(state.tables[state.ui.activeTable] || [])]
   state.pipeline.forEach(step => { try { data = step.fn(data) } catch(e) { console.error(e) } })
   renderPipelineBar(); renderPreview()
-  if (state.ui.mode === 'canvas') renderCanvas()
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ops panel
+// ─────────────────────────────────────────────────────────────────────────────
 
 function initOpsPanel() {
   const catsEl = document.getElementById('ops-cats')
@@ -245,13 +309,22 @@ function renderOps(cat='all') {
     const c = OP_CATEGORIES.find(c => c.id === cat)
     list.innerHTML = ops.map(o => opBtn(o, c?.color || '#22d3b8')).join('')
   }
+  // Phase 2: make op buttons draggable
   list.querySelectorAll('.op-btn').forEach(btn => {
-    btn.addEventListener('click', () => openModal(btn.dataset.id))
+    btn.setAttribute('draggable', 'true')
+    btn.addEventListener('click', () => {
+      if (state.ui.mode === 'canvas') {
+        // In canvas mode, clicking opens a floating placement instead of table modal
+        openModalForCanvas(btn.dataset.id, null, null)
+      } else {
+        openModal(btn.dataset.id)
+      }
+    })
   })
 }
 
 function opBtn(op, color) {
-  return `<button class="op-btn" data-id="${op.id}">
+  return `<button class="op-btn" data-id="${op.id}" draggable="true">
     <span class="op-icon" style="background:${color}22;color:${color};border-color:${color}44">${op.icon}</span>
     <span class="op-text">
       <span class="op-name">${op.name}</span>
@@ -260,7 +333,12 @@ function opBtn(op, color) {
   </button>`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Modal system (table mode + canvas drop)
+// ─────────────────────────────────────────────────────────────────────────────
+
 let currentOpId = null
+let _canvasDropCoords = null  // Phase 2: pending drop coordinates
 
 function initModal() {
   document.getElementById('modal-overlay')?.addEventListener('click', e => {
@@ -270,16 +348,238 @@ function initModal() {
   document.getElementById('modal-apply')?.addEventListener('click', applyOp)
 }
 
-
 function closeModal() {
   document.getElementById('modal-overlay').classList.remove('open')
   currentOpId = null
+  _canvasDropCoords = null
 }
 
 function getV(id) { return document.getElementById(id)?.value || '' }
 function getChecked(name) { return [...document.querySelectorAll('input[name="' + name + '"]:checked')].map(el => el.value) }
 
+// ── Phase 2: open modal in canvas context ──────────────────────────────────
+/**
+ * Opens the config modal, but on Apply places a canvas node instead of table op.
+ * If x/y are null, uses canvas center.
+ */
+function openModalForCanvas(opId, x, y) {
+  // Need at least one table or source node to work with
+  const hasTables = Object.keys(state.tables).length > 0
+  const hasSources = Object.values(state.graph?.nodes || {}).some(n => n.opId === '__source__')
+  if (!hasTables && !hasSources) {
+    showToast('Load a dataset first — then drag ops onto the canvas', 'error')
+    return
+  }
+
+  // For canvas mode, temporarily set activeTable if not set
+  const tableForModal = state.ui.activeTable || Object.keys(state.tables)[0]
+  if (tableForModal && !state.ui.activeTable) state.ui.activeTable = tableForModal
+
+  _canvasDropCoords = (x != null && y != null) ? { x, y } : getCanvasCenter()
+  currentOpId = opId
+  const op = OPERATIONS.find(o => o.id === opId)
+  const hdr = document.getElementById('modal-header')
+  hdr.innerHTML = `
+    <div class="modal-icon">${op.icon}</div>
+    <div>
+      <div class="modal-title">${op.name}</div>
+      <div class="modal-subtitle" style="display:flex;align-items:center;gap:6px">
+        ${op.desc}
+        <span style="font-size:9px;padding:1px 6px;border-radius:10px;background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border)">Canvas mode</span>
+      </div>
+    </div>
+    <button class="modal-close" id="modal-x">&#x2715;</button>`
+  document.getElementById('modal-x')?.addEventListener('click', closeModal)
+  document.getElementById('modal-body').innerHTML = buildModalBody(opId)
+  document.getElementById('modal-overlay').classList.add('open')
+  setTimeout(() => bindModalEvents(opId), 0)
+
+  // Update apply button text for canvas mode
+  const applyBtn = document.getElementById('modal-apply')
+  if (applyBtn) applyBtn.textContent = '⊞ Place on Canvas'
+}
+
+function getCanvasCenter() {
+  const vp = document.getElementById('canvas-viewport')
+  if (!vp) return { x: 100, y: 100 }
+  const zoom = state.canvas.zoom || 1
+  const panX = state.canvas.panX || 0, panY = state.canvas.panY || 0
+  return {
+    x: (vp.clientWidth  / 2 - panX) / zoom - 95,
+    y: (vp.clientHeight / 2 - panY) / zoom - 44
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Build config from form (shared by modal Apply + inspector Apply)
+// Returns { config, label, fn } or null if validation fails
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function buildConfigFromForm(opId) {
+  const op = OPERATIONS.find(o => o.id === opId)
+  if (!op) return null
+  let config = {}, label = op.name, fn
+
+  try {
+    switch(opId) {
+      case 'filter': {
+        const logic = getV('filter-logic')
+        const rules = [...document.querySelectorAll('#filter-rules .rule-row')].map(r => ({ col: r.querySelector('.r-col')?.value, op: r.querySelector('.r-op')?.value, val: r.querySelector('.r-val')?.value })).filter(r => r.col)
+        if (!rules.length) { showToast('Add at least one condition', 'error'); return null }
+        config = { logic, rules }; label = 'Filter (' + rules.length + ' rule' + (rules.length>1?'s':'') + ')'
+        fn = d => op.execute(d, config); break
+      }
+      case 'selectcols': {
+        const action = getV('sc-action'); const columns = getChecked('sc-cols')
+        if (!columns.length) { showToast('Select at least one column', 'error'); return null }
+        config = { action, columns }; label = (action==='keep'?'Keep ':'Drop ') + columns.length + ' col(s)'
+        fn = d => op.execute(d, config); break
+      }
+      case 'groupby': {
+        const groupCols = getChecked('gb-cols')
+        const aggregations = [...document.querySelectorAll('#agg-rows .agg-row')].map(r => ({ col: r.querySelector('.ag-col')?.value, fn: r.querySelector('.ag-fn')?.value, name: r.querySelector('.ag-name')?.value || (r.querySelector('.ag-col')?.value + '_' + r.querySelector('.ag-fn')?.value) })).filter(a => a.col && a.fn)
+        if (!groupCols.length || !aggregations.length) { showToast('Select group columns and add aggregations', 'error'); return null }
+        config = { groupCols, aggregations }; label = 'Group by ' + groupCols.join(', ')
+        fn = d => op.execute(d, config); break
+      }
+      case 'join': {
+        const rightTable = getV('join-table'); const leftKey = getV('join-left'); const rightKey = getV('join-right'); const joinType = getV('join-type')
+        if (!rightTable || !leftKey || !rightKey) { showToast('Fill all join fields', 'error'); return null }
+        config = { leftKey, rightKey, joinType, rightTable }; label = joinType + ' join → ' + rightTable
+        fn = d => op.execute(d, config, state.tables[rightTable]); break
+      }
+      case 'calcol': {
+        const outputName = getV('cc-name'); const colA = getV('cc-col-a'); const operator = getV('cc-op'); const colB = getV('cc-col-b'); const constVal = getV('cc-const-val')
+        if (!outputName || !colA) { showToast('Enter column name and select Column A', 'error'); return null }
+        config = { outputName, formulaType: 'arith', colA, operator, colB, constVal: +constVal }; label = 'Calc: ' + outputName
+        fn = d => op.execute(d, config); break
+      }
+      case 'rename': {
+        const map = {}; document.querySelectorAll('.rename-new').forEach(el => { if (el.value.trim() && el.value.trim() !== el.dataset.old) map[el.dataset.old] = el.value.trim() })
+        if (!Object.keys(map).length) { showToast('No columns renamed', 'error'); return null }
+        config = { map }; label = 'Rename ' + Object.keys(map).length + ' col(s)'; fn = d => op.execute(d, config); break
+      }
+      case 'dedup': { config = { mode: getV('dedup-mode'), keyCols: getChecked('dedup-cols'), keep: getV('dedup-keep') }; label = 'Deduplicate'; fn = d => op.execute(d, config); break }
+      case 'topn': { const sc = getV('topn-col'); if (!sc) { showToast('Select sort column', 'error'); return null }; config = { sortCol: sc, direction: getV('topn-dir'), n: +getV('topn-n')||10 }; label = (config.direction==='top'?'Top ':'Bottom ') + config.n + ' by ' + sc; fn = d => op.execute(d, config); break }
+      case 'datepart': { const dc = getV('dp-col'); if (!dc) { showToast('Select date column', 'error'); return null }; config = { dateCol: dc, parts: getChecked('dp-part') }; label = 'Date parts: ' + dc; fn = d => op.execute(d, config); break }
+      case 'freqdist': { const col = getV('fd-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { col, topN: +getV('fd-n')||20 }; label = 'Freq: ' + col; fn = d => op.execute(d, config); break }
+      case 'nullaudit': { label = 'Null audit'; fn = d => op.execute(d); break }
+      case 'summary':   { label = 'Column summary'; fn = d => op.execute(d); break }
+      case 'condtag': { const rules = [...document.querySelectorAll('#ctag-rules .rule-row')].map(r => ({ col: r.querySelector('.r-col')?.value, op: r.querySelector('.r-op')?.value, val: r.querySelector('.r-val')?.value, label: r.querySelector('.lbl-inp')?.value })).filter(r => r.col && r.label); config = { outputName: getV('ctag-name')||'Segment', defaultLabel: getV('ctag-default')||'Other', rules }; label = 'Tag: ' + config.outputName; fn = d => op.execute(d, config); break }
+      case 'percentile': { const col = getV('pct-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { col, bucketType: getV('pct-type'), outputName: getV('pct-name')||'Bucket' }; label = config.bucketType + ': ' + col; fn = d => op.execute(d, config); break }
+      case 'periodcomp': { const dc = getV('pc-date'), vc = getV('pc-val'); if (!dc||!vc) { showToast('Select date and value columns', 'error'); return null }; config = { dateCol: dc, valueCol: vc, period: getV('pc-period') }; label = config.period.toUpperCase() + ': ' + vc; fn = d => op.execute(d, config); break }
+      case 'rolling': { const vc = getV('roll-val'), sc = getV('roll-sort'); if (!vc||!sc) { showToast('Select value and sort columns', 'error'); return null }; config = { valueCol: vc, sortCol: sc, windowSize: +getV('roll-n')||3, aggregation: getV('roll-fn'), outputName: getV('roll-name')||'Rolling' }; label = 'Rolling ' + config.aggregation + '(' + config.windowSize + '): ' + vc; fn = d => op.execute(d, config); break }
+      case 'bin': { const col = getV('bin-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { col, method: getV('bin-method'), nBins: +getV('bin-n')||5, outputName: getV('bin-name')||'Bin' }; label = 'Bin: ' + col; fn = d => op.execute(d, config); break }
+      case 'rank': { const col = getV('rank-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { sortCol: col, rankType: getV('rank-type'), direction: getV('rank-dir'), outputName: getV('rank-name')||'Rank' }; label = 'Rank by: ' + col; fn = d => op.execute(d, config); break }
+      case 'pctotal': { const vc = getV('pct2-val'); if (!vc) { showToast('Select value column', 'error'); return null }; config = { valueCol: vc, scope: getV('pct2-scope'), groupCol: getV('pct2-group'), outputName: getV('pct2-name')||'Pct_of_Total' }; label = '% of total: ' + vc; fn = d => op.execute(d, config); break }
+      case 'sample': { config = { method: getV('samp-method'), value: +getV('samp-val')||10 }; label = 'Sample ' + config.value + (config.method==='pct'?'%':' rows'); fn = d => op.execute(d, config); break }
+      case 'fillnull': { const col = getV('fn-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { col, method: getV('fn-method'), constVal: getV('fn-val') }; label = 'Fill nulls: ' + col; fn = d => op.execute(d, config); break }
+      case 'changetype': { const col = getV('ct-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { col, targetType: getV('ct-type') }; label = 'Cast ' + col; fn = d => op.execute(d, config); break }
+      case 'findreplace': { const col = getV('fr-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { col, find: getV('fr-find'), replace: getV('fr-rep') }; label = 'Replace in: ' + col; fn = d => op.execute(d, config); break }
+      case 'datediff': { const s = getV('dd-start'), e = getV('dd-end'); if (!s||!e) { showToast('Select both date columns', 'error'); return null }; config = { startCol: s, endCol: e, unit: getV('dd-unit'), outputName: getV('dd-name')||'Date_Diff' }; label = 'Date diff: ' + s + ' to ' + e; fn = d => op.execute(d, config); break }
+      case 'laglead': { const vc = getV('ll-val'), sc = getV('ll-sort'); if (!vc||!sc) { showToast('Select value and sort columns', 'error'); return null }; config = { valueCol: vc, sortCol: sc, lagType: getV('ll-type'), offset: +getV('ll-n')||1, outputName: getV('ll-name')||'Prev_Value' }; label = getV('ll-type') + ': ' + vc; fn = d => op.execute(d, config); break }
+      case 'textops': { const col = getV('txt-col'); if (!col) { showToast('Select column', 'error'); return null }; config = { col, operation: getV('txt-op'), outputName: getV('txt-out')||col }; label = getV('txt-op') + ': ' + col; fn = d => op.execute(d, config); break }
+      case 'runningtot': { const vc = getV('rt-val'), sc = getV('rt-sort'); if (!vc||!sc) { showToast('Select value and sort columns', 'error'); return null }; config = { valueCol: vc, sortCol: sc, groupCol: getV('rt-group'), outputName: getV('rt-name')||'Running_Total' }; label = 'Running total: ' + vc; fn = d => op.execute(d, config); break }
+      case 'unpivot': { config = { idCols: getChecked('upiv-id'), varName: getV('upiv-var')||'variable', valName: getV('upiv-val')||'value' }; label = 'Unpivot'; fn = d => op.execute(d, config); break }
+      case 'pivot': { const rk = getV('piv-rows'), ck = getV('piv-cols'), vk = getV('piv-vals'); if (!rk||!ck||!vk) { showToast('Select all three columns', 'error'); return null }; config = { rowKey: rk, colKey: ck, valueKey: vk, agg: getV('piv-agg') }; label = 'Pivot: ' + vk + ' by ' + ck; fn = d => op.execute(d, config); break }
+      case 'dupfinder': { config = { mode: getV('df-mode'), keyCols: getChecked('df-cols') }; label = 'Duplicate finder'; fn = d => op.execute(d, config); break }
+      case 'crosstab': { const rc = getV('ct2-row'), cc = getV('ct2-col'); if (!rc||!cc) { showToast('Select row and column variables', 'error'); return null }; config = { rowCol: rc, colCol: cc, valueType: getV('ct2-vals') }; label = 'Crosstab: ' + rc + ' x ' + cc; fn = d => op.execute(d, config); break }
+      case 'pareto': { const pc = getV('par-cat'), pv = getV('par-val'); if (!pc||!pv) { showToast('Select category and value columns', 'error'); return null }; config = { catCol: pc, valueCol: pv }; label = 'Pareto: ' + pv; fn = d => op.execute(d, config); break }
+      case 'firstlast': { const fg = getV('fl-group'), fs = getV('fl-sort'); if (!fg||!fs) { showToast('Select group and sort columns', 'error'); return null }; config = { groupCol: fg, sortCol: fs, flagType: getV('fl-type'), outputName: getV('fl-name')||'Is_First' }; label = 'Flag ' + config.flagType; fn = d => op.execute(d, config); break }
+      case 'fiscal': { const dc = getV('fisc-col'); if (!dc) { showToast('Select date column', 'error'); return null }; config = { dateCol: dc, fiscalStartMonth: +getV('fisc-month')||4, parts: ['Fiscal_Year','Fiscal_Quarter','Fiscal_Month'] }; label = 'Fiscal calendar: ' + dc; fn = d => op.execute(d, config); break }
+      case 'antijoin': { const rt = getV('aj-table'), lk = getV('aj-left'), rk = getV('aj-right'); if (!rt||!lk||!rk) { showToast('Fill all fields', 'error'); return null }; config = { leftKey: lk, rightKey: rk, rightTable: rt }; label = 'Anti-join vs ' + rt; fn = d => op.execute(d, config, state.tables[rt]); break }
+      case 'union': { const rt = getV('union-table'); if (!rt) { showToast('Select a table', 'error'); return null }; config = { mismatch: getV('union-mis'), rightTable: rt }; label = 'Union with ' + rt; fn = d => op.execute(d, config, state.tables[rt]); break }
+      case 'lookup': { const rt = getV('lkp-table'), lk = getV('lkp-left'), rk = getV('lkp-right'), vc = getV('lkp-col'); if (!rt||!lk||!rk||!vc) { showToast('Fill all fields', 'error'); return null }; config = { leftKey: lk, rightKey: rk, valueCol: vc, outputName: getV('lkp-name')||vc, rightTable: rt }; label = 'Lookup ' + vc + ' from ' + rt; fn = d => op.execute(d, config, state.tables[rt]); break }
+      case 'corr': { const cols = getChecked('corr-cols'); if (!cols.length) { showToast('Select columns', 'error'); return null }; config = { columns: cols }; label = 'Correlation matrix'; fn = d => op.execute(d, config); break }
+      default: showToast(opId + ' not yet wired', 'error'); return null
+    }
+    return { config, label, fn }
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error')
+    console.error(e)
+    return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// applyOp — handles BOTH table mode and canvas mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+function applyOp() {
+  if (!currentOpId) return
+
+  // ── Canvas mode: place node ──────────────────────────────────────────
+  if (_canvasDropCoords) {
+    const result = buildConfigFromForm(currentOpId)
+    if (!result) return
+    const { config, label } = result
+    const op = OPERATIONS.find(o => o.id === currentOpId)
+    const { x, y } = _canvasDropCoords
+
+    const nodeId = placeCanvasNode({
+      opId: currentOpId, config, label, icon: op.icon, x, y,
+      sourceTable: state.ui.activeTable || Object.keys(state.tables)[0] || null
+    })
+
+    // Auto-execute if we have a source
+    const sourceTable = state.graph.nodes[nodeId]?.sourceTable
+    if (sourceTable) {
+      executeGraphFrom(nodeId)
+    }
+
+    closeModal()
+    // Reset apply button text
+    const applyBtn = document.getElementById('modal-apply')
+    if (applyBtn) applyBtn.textContent = 'Apply'
+
+    showToast('✓ ' + label + ' placed on canvas', 'success')
+    return
+  }
+
+  // ── Table mode: existing pipeline logic ─────────────────────────────
+  if (!state.ui.activeTable) return
+  const op   = OPERATIONS.find(o => o.id === currentOpId)
+  const data = state.tables[state.ui.activeTable] || []
+
+  const result = buildConfigFromForm(currentOpId)
+  if (!result) return
+  const { config, label, fn } = result
+
+  try {
+    const newData = fn(data)
+    if (!newData?.length) { showToast('Operation returned 0 rows', 'error'); return }
+
+    let rName = state.ui.activeTable + '_result'; let i = 2
+    while (state.tables[rName]) rName = state.ui.activeTable + '_result_' + i++
+    state.tables[rName] = newData
+    state.tablesMeta[rName] = { ...buildMeta(newData), isResult: true, filename: 'Result of ' + label }
+    state.pipeline.push({ id: currentOpId, fn, label, icon: op.icon })
+    state.ui.activeTable = rName
+
+    closeModal(); renderTableList(); renderPipelineBar(); renderPreview()
+    showToast('\u2713 ' + label + ' \u2192 ' + newData.length.toLocaleString() + ' rows', 'success')
+    state.auditLog.push({ op: label, detail: data.length.toLocaleString() + ' \u2192 ' + newData.length.toLocaleString() + ' rows', time: new Date().toLocaleTimeString() })
+    renderAudit()
+  } catch(e) { showToast('Error: ' + e.message, 'error'); console.error(e) }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modal body builder (same as v1, exposed via window)
+// ─────────────────────────────────────────────────────────────────────────────
+
 function buildModalBody(opId) {
+  const inner = buildModalBodyInner(opId)
+  const sqlBlock = `
+    <button class="sql-toggle" id="sql-toggle-btn" onclick="window._toggleSQL(this)">
+      <span style="font-size:13px">⟨/⟩</span>
+      <span style="flex:1">View equivalent SQL</span>
+      <span class="sql-arrow">▼</span>
+    </button>
+    <div class="sql-panel" id="sql-panel"></div>`
+  return inner + sqlBlock
+}
+
+function buildModalBodyInner(opId) {
   const data = state.ui.activeTable ? (state.tables[state.ui.activeTable] || []) : []
   const c = data.length ? Object.keys(data[0]) : []
   const colSel = (id, label) => `<div class="field"><label>${label}</label>
@@ -332,6 +632,190 @@ function buildModalBody(opId) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SQL Preview
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Expose for inline onclick in modal HTML
+window._toggleSQL = toggleSQL
+
+function toggleSQL(btn) {
+  const panel = btn.nextElementSibling
+  btn.classList.toggle('open')
+  panel.classList.toggle('open')
+  if (panel.classList.contains('open')) {
+    panel.innerHTML = generateSQL(currentOpId)
+  }
+}
+
+function generateSQL(opId) {
+  const tbl = state.ui.activeTable || 'your_table'
+  const data = state.ui.activeTable ? (state.tables[state.ui.activeTable] || []) : []
+  const c = data.length ? Object.keys(data[0]) : []
+  const kw = s => `<span class="sql-kw">${s}</span>`
+  const sfn = s => `<span class="sql-fn">${s}</span>`
+  const st = s => `<span class="sql-str">'${s}'</span>`
+  const cm = s => `<span class="sql-cm">-- ${s}</span>`
+  try {
+    switch(opId) {
+      case 'filter': {
+        const logic = getV('filter-logic') || 'AND'
+        const rows = [...document.querySelectorAll('#filter-rules .rule-row')]
+        if (!rows.length) return cm('Add conditions above to see SQL')
+        const clauses = rows.map(r => {
+          const col = r.querySelector('.r-col')?.value || 'col'
+          const op  = r.querySelector('.r-op')?.value  || '=='
+          const val = r.querySelector('.r-val')?.value  || 'val'
+          const sop = op==='=='?'=':op==='!='?'<>':op==='contains'?'LIKE':op==='is empty'?'IS NULL':op==='is not empty'?'IS NOT NULL':op
+          if (op==='contains') return `${col} ${sop} ${st('%'+val+'%')}`
+          if (op==='is empty'||op==='is not empty') return `${col} ${sop}`
+          return isNaN(val) ? `${col} ${sop} ${st(val)}` : `${col} ${sop} ${val}`
+        })
+        return `${kw('SELECT')} *\n${kw('FROM')}   ${tbl}\n${kw('WHERE')}  ${clauses.join('\n  '+kw(logic)+'  ')};`
+      }
+      case 'groupby': {
+        const gcols = getChecked('gb-cols')
+        const aggs = [...document.querySelectorAll('#agg-rows .agg-row')].map(r => ({
+          col: r.querySelector('.ag-col')?.value,
+          fn:  r.querySelector('.ag-fn')?.value,
+          name: r.querySelector('.ag-name')?.value || (r.querySelector('.ag-col')?.value + '_' + r.querySelector('.ag-fn')?.value)
+        })).filter(a => a.col && a.fn)
+        if (!gcols.length && !aggs.length) return cm('Configure above to see SQL')
+        const aggStr = aggs.map(a =>
+          a.fn==='COUNT'         ? `  ${sfn('COUNT')}(*) ${kw('AS')} ${a.name}` :
+          a.fn==='COUNT_DISTINCT'? `  ${sfn('COUNT')}(${kw('DISTINCT')} ${a.col}) ${kw('AS')} ${a.name}` :
+                                   `  ${sfn(a.fn)}(${a.col}) ${kw('AS')} ${a.name}`
+        )
+        return `${kw('SELECT')}\n  ${gcols.join(',\n  ')},\n${aggStr.join(',\n')}\n${kw('FROM')}   ${tbl}\n${kw('GROUP BY')} ${gcols.join(', ')};`
+      }
+      case 'join': {
+        const jt = getV('join-type') || 'inner'
+        const lk = getV('join-left') || 'key'
+        const rk = getV('join-right') || 'key'
+        const rt = getV('join-table') || 'other_table'
+        const jw = jt==='inner'?'INNER JOIN':jt==='left'?'LEFT JOIN':jt==='right'?'RIGHT JOIN':'FULL OUTER JOIN'
+        return `${kw('SELECT')} a.*, b.*\n${kw('FROM')}   ${tbl} a\n${kw(jw)} ${rt} b\n  ${kw('ON')}  a.${lk} = b.${rk};`
+      }
+      case 'calcol': {
+        const n = getV('cc-name') || 'new_col'
+        const a = getV('cc-col-a') || 'col_a'
+        const op = getV('cc-op') || '/'
+        const b = getV('cc-col-b') || 'col_b'
+        return `${kw('SELECT')} *,\n  ${a} ${op} ${b} ${kw('AS')} ${n}\n${kw('FROM')} ${tbl};`
+      }
+      case 'selectcols': {
+        const act = getV('sc-action')
+        const sel = getChecked('sc-cols')
+        const keep = act==='keep' ? sel : c.filter(x => !sel.includes(x))
+        return keep.length ? `${kw('SELECT')} ${keep.join(', ')}\n${kw('FROM')} ${tbl};` : cm('Select columns above')
+      }
+      case 'dedup': {
+        const mode = getV('dedup-mode')
+        const kc = mode==='key' ? getChecked('dedup-cols') : c
+        return `${kw('SELECT DISTINCT')} ${(kc.length ? kc : ['*']).join(', ')}\n${kw('FROM')} ${tbl};`
+      }
+      case 'topn': {
+        const n = getV('topn-n') || 10
+        const sc = getV('topn-col') || (c[0] || 'col')
+        const dir = getV('topn-dir') === 'bottom' ? 'ASC' : 'DESC'
+        return `${kw('SELECT')} *\n${kw('FROM')} ${tbl}\n${kw('ORDER BY')} ${sc} ${kw(dir)}\n${kw('LIMIT')} ${n};`
+      }
+      case 'pivot': {
+        const rk = getV('piv-rows') || 'row'
+        const ck = getV('piv-cols') || 'col'
+        const vk = getV('piv-vals') || 'val'
+        const ag = getV('piv-agg') || 'SUM'
+        return `${cm('Use CASE WHEN for each pivot value')}\n${kw('SELECT')} ${rk},\n  ${sfn(ag)}(${kw('CASE WHEN')} ${ck}=${st('v1')} ${kw('THEN')} ${vk} ${kw('END')}) ${kw('AS')} v1\n${kw('FROM')} ${tbl}\n${kw('GROUP BY')} ${rk};`
+      }
+      case 'runningtot': {
+        const vc = getV('rt-val') || 'val'
+        const sc = getV('rt-sort') || 'ord'
+        const grp = getV('rt-group')
+        const pb = grp ? `${kw('PARTITION BY')} ${grp} ` : ''
+        return `${kw('SELECT')} *,\n  ${sfn('SUM')}(${vc}) ${kw('OVER')} (${pb}${kw('ORDER BY')} ${sc}) ${kw('AS')} Running_Total\n${kw('FROM')} ${tbl};`
+      }
+      case 'rank': {
+        const sc = getV('rank-col') || 'val'
+        const rt = getV('rank-type') || 'rank'
+        const rd = getV('rank-dir') === 'asc' ? 'ASC' : 'DESC'
+        const fnm = rt==='dense'?'DENSE_RANK':rt==='row'?'ROW_NUMBER':'RANK'
+        return `${kw('SELECT')} *,\n  ${sfn(fnm)}() ${kw('OVER')} (${kw('ORDER BY')} ${sc} ${kw(rd)}) ${kw('AS')} Rank\n${kw('FROM')} ${tbl};`
+      }
+      case 'rolling': {
+        const rv = getV('roll-val') || 'val'
+        const rn = +getV('roll-n') || 3
+        const rfn = getV('roll-fn') || 'AVG'
+        return `${kw('SELECT')} *,\n  ${sfn(rfn)}(${rv}) ${kw('OVER')} (\n    ${kw('ORDER BY')} order_col\n    ${kw('ROWS BETWEEN')} ${rn-1} ${kw('PRECEDING AND CURRENT ROW')}\n  ) ${kw('AS')} Rolling\n${kw('FROM')} ${tbl};`
+      }
+      case 'pctotal': {
+        const vc = getV('pct2-val') || 'val'
+        return `${kw('SELECT')} *,\n  ${vc} * 100.0 / ${sfn('SUM')}(${vc}) ${kw('OVER')} () ${kw('AS')} Pct_of_Total\n${kw('FROM')} ${tbl};`
+      }
+      case 'nullaudit': {
+        const sample = c.slice(0, 4)
+        return `${kw('SELECT')}\n  ${sample.map(col => `${sfn('SUM')}(${kw('CASE WHEN')} ${col} ${kw('IS NULL THEN')} 1 ${kw('ELSE')} 0 ${kw('END')}) ${kw('AS')} ${col}_nulls`).join(',\n  ')}\n${kw('FROM')} ${tbl};`
+      }
+      case 'freqdist': {
+        const fc = getV('fd-col') || (c[0] || 'col')
+        const n = getV('fd-n') || 20
+        return `${kw('SELECT')} ${fc}, ${sfn('COUNT')}(*) ${kw('AS')} frequency\n${kw('FROM')} ${tbl}\n${kw('GROUP BY')} ${fc}\n${kw('ORDER BY')} frequency ${kw('DESC')}\n${kw('LIMIT')} ${n};`
+      }
+      case 'datepart': {
+        const dc = getV('dp-col') || 'date_col'
+        return `${kw('SELECT')} *,\n  ${sfn('YEAR')}(${dc}) ${kw('AS')} ${dc}_Year,\n  ${sfn('MONTH')}(${dc}) ${kw('AS')} ${dc}_Month,\n  ${sfn('QUARTER')}(${dc}) ${kw('AS')} ${dc}_Quarter\n${kw('FROM')} ${tbl};`
+      }
+      case 'datediff': {
+        const s = getV('dd-start') || 'start_date'
+        const e = getV('dd-end')   || 'end_date'
+        return `${kw('SELECT')} *,\n  ${sfn('DATEDIFF')}(${e}, ${s}) ${kw('AS')} Date_Diff\n${kw('FROM')} ${tbl};\n${cm('DATEDIFF syntax varies by database')}`
+      }
+      case 'periodcomp': {
+        const pv = getV('pc-val') || 'val'
+        const pp = getV('pc-period') || 'yoy'
+        return `${kw('SELECT')} *,\n  ${sfn('LAG')}(${pv}, 1) ${kw('OVER')} (${kw('ORDER BY')} date_col) ${kw('AS')} Prior_${pp.toUpperCase()}_Val\n${kw('FROM')} ${tbl};`
+      }
+      case 'antijoin': {
+        const rt = getV('aj-table') || 'other'
+        const lk = getV('aj-left')  || 'key'
+        const rk = getV('aj-right') || 'key'
+        return `${kw('SELECT')} a.*\n${kw('FROM')} ${tbl} a\n${kw('LEFT JOIN')} ${rt} b ${kw('ON')} a.${lk} = b.${rk}\n${kw('WHERE')} b.${rk} ${kw('IS NULL')};`
+      }
+      case 'lookup': {
+        const rt = getV('lkp-table') || 'other'
+        const lk = getV('lkp-left')  || 'key'
+        const rk = getV('lkp-right') || 'key'
+        const vc = getV('lkp-col')   || 'value_col'
+        const nn = getV('lkp-name')  || vc
+        return `${kw('SELECT')} a.*, b.${vc} ${kw('AS')} ${nn}\n${kw('FROM')} ${tbl} a\n${kw('LEFT JOIN')} ${rt} b ${kw('ON')} a.${lk} = b.${rk};`
+      }
+      case 'union': {
+        const rt = getV('union-table') || 'other_table'
+        return `${kw('SELECT')} * ${kw('FROM')} ${tbl}\n${kw('UNION ALL')}\n${kw('SELECT')} * ${kw('FROM')} ${rt};`
+      }
+      case 'sample': {
+        const v = getV('samp-val') || 10
+        const m = getV('samp-method') || 'pct'
+        return m === 'pct'
+          ? `${kw('SELECT')} * ${kw('FROM')} ${tbl}\n${kw('TABLESAMPLE')} BERNOULLI(${v}); ${cm('syntax varies by DB')}`
+          : `${kw('SELECT')} * ${kw('FROM')} ${tbl}\n${kw('ORDER BY')} ${sfn('RANDOM')}()\n${kw('LIMIT')} ${v};`
+      }
+      case 'crosstab': {
+        const rc = getV('ct2-row') || 'row_col'
+        const cc2 = getV('ct2-col') || 'col_col'
+        return `${cm('Use CASE WHEN for each category value')}\n${kw('SELECT')} ${rc},\n  ${sfn('COUNT')}(${kw('CASE WHEN')} ${cc2}=${st('A')} ${kw('THEN')} 1 ${kw('END')}) ${kw('AS')} A\n${kw('FROM')} ${tbl}\n${kw('GROUP BY')} ${rc};`
+      }
+      case 'corr': {
+        const cc3 = getChecked('corr-cols').slice(0,2)
+        if (cc3.length < 2) return cm('Select at least 2 columns above')
+        return `${cm('Pearson correlation — exact syntax varies by database')}\n${kw('SELECT')} ${sfn('CORR')}(${cc3[0]}, ${cc3[1]}) ${kw('AS')} correlation\n${kw('FROM')} ${tbl};`
+      }
+      default: return cm('SQL equivalent not available for this operation')
+    }
+  } catch(err) {
+    return '<span class="sql-cm">-- Configure the operation above to see SQL</span>'
+  }
+}
+
 function bindModalEvents(opId) {
   if (opId === 'filter') {
     document.getElementById('add-rule-btn')?.addEventListener('click', () => addFilterRule('filter-rules'))
@@ -362,20 +846,25 @@ function bindModalEvents(opId) {
   }
 }
 
-const _origOpenModal = openModal
-window._openModal = openModal
-
 function openModal(opId) {
   if (!state.ui.activeTable) { showToast('Load a dataset first', 'error'); return }
   currentOpId = opId
+  _canvasDropCoords = null  // table mode
   const op = OPERATIONS.find(o => o.id === opId)
   const hdr = document.getElementById('modal-header')
   hdr.innerHTML = `<div class="modal-icon">${op.icon}</div><div><div class="modal-title">${op.name}</div><div class="modal-subtitle">${op.desc}</div></div><button class="modal-close" id="modal-x">&#x2715;</button>`
   document.getElementById('modal-x')?.addEventListener('click', closeModal)
   document.getElementById('modal-body').innerHTML = buildModalBody(opId)
   document.getElementById('modal-overlay').classList.add('open')
+  // Reset apply button to table mode text
+  const applyBtn = document.getElementById('modal-apply')
+  if (applyBtn) applyBtn.textContent = 'Apply'
   setTimeout(() => bindModalEvents(opId), 0)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule/agg builders
+// ─────────────────────────────────────────────────────────────────────────────
 
 function addFilterRule(containerId) {
   const data = state.ui.activeTable ? (state.tables[state.ui.activeTable] || []) : []
@@ -412,103 +901,9 @@ function addTagRule(containerId) {
   document.getElementById(containerId).appendChild(r)
 }
 
-function applyOp() {
-  if (!currentOpId || !state.ui.activeTable) return
-  const op   = OPERATIONS.find(o => o.id === currentOpId)
-  const data = state.tables[state.ui.activeTable] || []
-  let config = {}, label = op.name, fn
-
-  try {
-    switch(currentOpId) {
-      case 'filter': {
-        const logic = getV('filter-logic')
-        const rules = [...document.querySelectorAll('#filter-rules .rule-row')].map(r => ({ col: r.querySelector('.r-col')?.value, op: r.querySelector('.r-op')?.value, val: r.querySelector('.r-val')?.value })).filter(r => r.col)
-        if (!rules.length) { showToast('Add at least one condition', 'error'); return }
-        config = { logic, rules }; label = 'Filter (' + rules.length + ' rule' + (rules.length>1?'s':'') + ')'
-        fn = d => op.execute(d, config); break
-      }
-      case 'selectcols': {
-        const action = getV('sc-action'); const columns = getChecked('sc-cols')
-        if (!columns.length) { showToast('Select at least one column', 'error'); return }
-        config = { action, columns }; label = (action==='keep'?'Keep ':'Drop ') + columns.length + ' col(s)'
-        fn = d => op.execute(d, config); break
-      }
-      case 'groupby': {
-        const groupCols = getChecked('gb-cols')
-        const aggregations = [...document.querySelectorAll('#agg-rows .agg-row')].map(r => ({ col: r.querySelector('.ag-col')?.value, fn: r.querySelector('.ag-fn')?.value, name: r.querySelector('.ag-name')?.value || (r.querySelector('.ag-col')?.value + '_' + r.querySelector('.ag-fn')?.value) })).filter(a => a.col && a.fn)
-        if (!groupCols.length || !aggregations.length) { showToast('Select group columns and add aggregations', 'error'); return }
-        config = { groupCols, aggregations }; label = 'Group by ' + groupCols.join(', ')
-        fn = d => op.execute(d, config); break
-      }
-      case 'join': {
-        const rightTable = getV('join-table'); const leftKey = getV('join-left'); const rightKey = getV('join-right'); const joinType = getV('join-type')
-        if (!rightTable || !leftKey || !rightKey) { showToast('Fill all join fields', 'error'); return }
-        config = { leftKey, rightKey, joinType }; label = joinType + ' join with ' + rightTable
-        fn = d => op.execute(d, config, state.tables[rightTable]); break
-      }
-      case 'calcol': {
-        const outputName = getV('cc-name'); const colA = getV('cc-col-a'); const operator = getV('cc-op'); const colB = getV('cc-col-b'); const constVal = getV('cc-const-val')
-        if (!outputName || !colA) { showToast('Enter column name and select Column A', 'error'); return }
-        config = { outputName, formulaType: 'arith', colA, operator, colB, constVal: +constVal }; label = 'Calc: ' + outputName
-        fn = d => op.execute(d, config); break
-      }
-      case 'rename': {
-        const map = {}; document.querySelectorAll('.rename-new').forEach(el => { if (el.value.trim() && el.value.trim() !== el.dataset.old) map[el.dataset.old] = el.value.trim() })
-        if (!Object.keys(map).length) { showToast('No columns renamed', 'error'); return }
-        config = { map }; label = 'Rename ' + Object.keys(map).length + ' col(s)'; fn = d => op.execute(d, config); break
-      }
-      case 'dedup': { config = { mode: getV('dedup-mode'), keyCols: getChecked('dedup-cols'), keep: getV('dedup-keep') }; label = 'Deduplicate'; fn = d => op.execute(d, config); break }
-      case 'topn': { const sc = getV('topn-col'); if (!sc) { showToast('Select sort column', 'error'); return }; config = { sortCol: sc, direction: getV('topn-dir'), n: +getV('topn-n')||10 }; label = (config.direction==='top'?'Top ':'Bottom ') + config.n + ' by ' + sc; fn = d => op.execute(d, config); break }
-      case 'datepart': { const dc = getV('dp-col'); if (!dc) { showToast('Select date column', 'error'); return }; config = { dateCol: dc, parts: getChecked('dp-part') }; label = 'Date parts: ' + dc; fn = d => op.execute(d, config); break }
-      case 'freqdist': { const col = getV('fd-col'); if (!col) { showToast('Select column', 'error'); return }; config = { col, topN: +getV('fd-n')||20 }; label = 'Freq: ' + col; fn = d => op.execute(d, config); break }
-      case 'nullaudit': { label = 'Null audit'; fn = d => op.execute(d); break }
-      case 'summary':   { label = 'Column summary'; fn = d => op.execute(d); break }
-      case 'condtag': { const rules = [...document.querySelectorAll('#ctag-rules .rule-row')].map(r => ({ col: r.querySelector('.r-col')?.value, op: r.querySelector('.r-op')?.value, val: r.querySelector('.r-val')?.value, label: r.querySelector('.lbl-inp')?.value })).filter(r => r.col && r.label); config = { outputName: getV('ctag-name')||'Segment', defaultLabel: getV('ctag-default')||'Other', rules }; label = 'Tag: ' + config.outputName; fn = d => op.execute(d, config); break }
-      case 'percentile': { const col = getV('pct-col'); if (!col) { showToast('Select column', 'error'); return }; config = { col, bucketType: getV('pct-type'), outputName: getV('pct-name')||'Bucket' }; label = config.bucketType + ': ' + col; fn = d => op.execute(d, config); break }
-      case 'periodcomp': { const dc = getV('pc-date'), vc = getV('pc-val'); if (!dc||!vc) { showToast('Select date and value columns', 'error'); return }; config = { dateCol: dc, valueCol: vc, period: getV('pc-period') }; label = config.period.toUpperCase() + ': ' + vc; fn = d => op.execute(d, config); break }
-      case 'rolling': { const vc = getV('roll-val'), sc = getV('roll-sort'); if (!vc||!sc) { showToast('Select value and sort columns', 'error'); return }; config = { valueCol: vc, sortCol: sc, windowSize: +getV('roll-n')||3, aggregation: getV('roll-fn'), outputName: getV('roll-name')||'Rolling' }; label = 'Rolling ' + config.aggregation + '(' + config.windowSize + '): ' + vc; fn = d => op.execute(d, config); break }
-      case 'bin': { const col = getV('bin-col'); if (!col) { showToast('Select column', 'error'); return }; config = { col, method: getV('bin-method'), nBins: +getV('bin-n')||5, outputName: getV('bin-name')||'Bin' }; label = 'Bin: ' + col; fn = d => op.execute(d, config); break }
-      case 'rank': { const col = getV('rank-col'); if (!col) { showToast('Select column', 'error'); return }; config = { sortCol: col, rankType: getV('rank-type'), direction: getV('rank-dir'), outputName: getV('rank-name')||'Rank' }; label = 'Rank by: ' + col; fn = d => op.execute(d, config); break }
-      case 'pctotal': { const vc = getV('pct2-val'); if (!vc) { showToast('Select value column', 'error'); return }; config = { valueCol: vc, scope: getV('pct2-scope'), groupCol: getV('pct2-group'), outputName: getV('pct2-name')||'Pct_of_Total' }; label = '% of total: ' + vc; fn = d => op.execute(d, config); break }
-      case 'sample': { config = { method: getV('samp-method'), value: +getV('samp-val')||10 }; label = 'Sample ' + config.value + (config.method==='pct'?'%':' rows'); fn = d => op.execute(d, config); break }
-      case 'fillnull': { const col = getV('fn-col'); if (!col) { showToast('Select column', 'error'); return }; config = { col, method: getV('fn-method'), constVal: getV('fn-val') }; label = 'Fill nulls: ' + col; fn = d => op.execute(d, config); break }
-      case 'changetype': { const col = getV('ct-col'); if (!col) { showToast('Select column', 'error'); return }; config = { col, targetType: getV('ct-type') }; label = 'Cast ' + col; fn = d => op.execute(d, config); break }
-      case 'findreplace': { const col = getV('fr-col'); if (!col) { showToast('Select column', 'error'); return }; config = { col, find: getV('fr-find'), replace: getV('fr-rep') }; label = 'Replace in: ' + col; fn = d => op.execute(d, config); break }
-      case 'datediff': { const s = getV('dd-start'), e = getV('dd-end'); if (!s||!e) { showToast('Select both date columns', 'error'); return }; config = { startCol: s, endCol: e, unit: getV('dd-unit'), outputName: getV('dd-name')||'Date_Diff' }; label = 'Date diff: ' + s + ' to ' + e; fn = d => op.execute(d, config); break }
-      case 'laglead': { const vc = getV('ll-val'), sc = getV('ll-sort'); if (!vc||!sc) { showToast('Select value and sort columns', 'error'); return }; config = { valueCol: vc, sortCol: sc, lagType: getV('ll-type'), offset: +getV('ll-n')||1, outputName: getV('ll-name')||'Prev_Value' }; label = getV('ll-type') + ': ' + vc; fn = d => op.execute(d, config); break }
-      case 'textops': { const col = getV('txt-col'); if (!col) { showToast('Select column', 'error'); return }; config = { col, operation: getV('txt-op'), outputName: getV('txt-out')||col }; label = getV('txt-op') + ': ' + col; fn = d => op.execute(d, config); break }
-      case 'runningtot': { const vc = getV('rt-val'), sc = getV('rt-sort'); if (!vc||!sc) { showToast('Select value and sort columns', 'error'); return }; config = { valueCol: vc, sortCol: sc, groupCol: getV('rt-group'), outputName: getV('rt-name')||'Running_Total' }; label = 'Running total: ' + vc; fn = d => op.execute(d, config); break }
-      case 'unpivot': { config = { idCols: getChecked('upiv-id'), varName: getV('upiv-var')||'variable', valName: getV('upiv-val')||'value' }; label = 'Unpivot'; fn = d => op.execute(d, config); break }
-      case 'pivot': { const rk = getV('piv-rows'), ck = getV('piv-cols'), vk = getV('piv-vals'); if (!rk||!ck||!vk) { showToast('Select all three columns', 'error'); return }; config = { rowKey: rk, colKey: ck, valueKey: vk, agg: getV('piv-agg') }; label = 'Pivot: ' + vk + ' by ' + ck; fn = d => op.execute(d, config); break }
-      case 'dupfinder': { config = { mode: getV('df-mode'), keyCols: getChecked('df-cols') }; label = 'Duplicate finder'; fn = d => op.execute(d, config); break }
-      case 'crosstab': { const rc = getV('ct2-row'), cc = getV('ct2-col'); if (!rc||!cc) { showToast('Select row and column variables', 'error'); return }; config = { rowCol: rc, colCol: cc, valueType: getV('ct2-vals') }; label = 'Crosstab: ' + rc + ' x ' + cc; fn = d => op.execute(d, config); break }
-      case 'pareto': { const pc = getV('par-cat'), pv = getV('par-val'); if (!pc||!pv) { showToast('Select category and value columns', 'error'); return }; config = { catCol: pc, valueCol: pv }; label = 'Pareto: ' + pv; fn = d => op.execute(d, config); break }
-      case 'firstlast': { const fg = getV('fl-group'), fs = getV('fl-sort'); if (!fg||!fs) { showToast('Select group and sort columns', 'error'); return }; config = { groupCol: fg, sortCol: fs, flagType: getV('fl-type'), outputName: getV('fl-name')||'Is_First' }; label = 'Flag ' + config.flagType; fn = d => op.execute(d, config); break }
-      case 'fiscal': { const dc = getV('fisc-col'); if (!dc) { showToast('Select date column', 'error'); return }; config = { dateCol: dc, fiscalStartMonth: +getV('fisc-month')||4, parts: ['Fiscal_Year','Fiscal_Quarter','Fiscal_Month'] }; label = 'Fiscal calendar: ' + dc; fn = d => op.execute(d, config); break }
-      case 'antijoin': { const rt = getV('aj-table'), lk = getV('aj-left'), rk = getV('aj-right'); if (!rt||!lk||!rk) { showToast('Fill all fields', 'error'); return }; config = { leftKey: lk, rightKey: rk }; label = 'Anti-join vs ' + rt; fn = d => op.execute(d, config, state.tables[rt]); break }
-      case 'union': { const rt = getV('union-table'); if (!rt) { showToast('Select a table', 'error'); return }; config = { mismatch: getV('union-mis') }; label = 'Union with ' + rt; fn = d => op.execute(d, config, state.tables[rt]); break }
-      case 'lookup': { const rt = getV('lkp-table'), lk = getV('lkp-left'), rk = getV('lkp-right'), vc = getV('lkp-col'); if (!rt||!lk||!rk||!vc) { showToast('Fill all fields', 'error'); return }; config = { leftKey: lk, rightKey: rk, valueCol: vc, outputName: getV('lkp-name')||vc }; label = 'Lookup ' + vc + ' from ' + rt; fn = d => op.execute(d, config, state.tables[rt]); break }
-      case 'corr': { const cols = getChecked('corr-cols'); if (!cols.length) { showToast('Select columns', 'error'); return }; config = { columns: cols }; label = 'Correlation matrix'; fn = d => op.execute(d, config); break }
-      default: showToast(currentOpId + ' not yet wired', 'error'); return
-    }
-
-    const newData = fn(data)
-    if (!newData?.length) { showToast('Operation returned 0 rows', 'error'); return }
-
-    let rName = state.ui.activeTable + '_result'; let i = 2
-    while (state.tables[rName]) rName = state.ui.activeTable + '_result_' + i++
-    state.tables[rName] = newData
-    state.tablesMeta[rName] = { ...buildMeta(newData), isResult: true, filename: 'Result of ' + label }
-    state.pipeline.push({ id: currentOpId, fn, label, icon: op.icon })
-    state.ui.activeTable = rName
-
-    closeModal(); renderTableList(); renderPipelineBar(); renderPreview()
-    if (state.ui.mode === 'canvas') renderCanvas()
-    showToast('\u2713 ' + label + ' \u2192 ' + newData.length.toLocaleString() + ' rows', 'success')
-    state.auditLog.push({ op: label, detail: data.length.toLocaleString() + ' \u2192 ' + newData.length.toLocaleString() + ' rows', time: new Date().toLocaleTimeString() })
-    renderAudit()
-  } catch(e) { showToast('Error: ' + e.message, 'error'); console.error(e) }
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit
+// ─────────────────────────────────────────────────────────────────────────────
 
 function renderAudit() {
   const el = document.getElementById('audit-entries')
@@ -526,59 +921,47 @@ function exportData() {
   showToast('Exported as CSV', 'success')
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Canvas (read-only legacy — Phase 2 takes over when in canvas mode)
+// ─────────────────────────────────────────────────────────────────────────────
+
 let _canvasNodes = []
 const snap = v => Math.round(v / 20) * 20
 
 function initCanvas() {
   const vp = document.getElementById('canvas-viewport')
   if (!vp) return
-  let panning = false, panStart = null, dragging = null
-  vp.addEventListener('mousedown', e => { if (e.target.closest('.cn-node')) return; panning = true; panStart = { x: e.clientX - state.canvas.panX, y: e.clientY - state.canvas.panY } })
-  vp.addEventListener('mousemove', e => {
-    if (dragging) {
-      const node = _canvasNodes.find(n => n.id === dragging.id)
-      if (node) { node.x = snap(dragging.origX + (e.clientX - dragging.startX) / state.canvas.zoom); node.y = snap(dragging.origY + (e.clientY - dragging.startY) / state.canvas.zoom); const el = document.getElementById('cn-' + dragging.id); if (el) { el.style.left = node.x + 'px'; el.style.top = node.y + 'px' }; renderConnectors() }
-    } else if (panning && panStart) { state.canvas.panX = e.clientX - panStart.x; state.canvas.panY = e.clientY - panStart.y; applyTransform() }
+  let panning = false, panStart = null
+
+  // Panning (only when not dragging a node or wire)
+  vp.addEventListener('mousedown', e => {
+    if (e.target.closest('.cn-node') || e.target.closest('.cn2-node')) return
+    panning = true; panStart = { x: e.clientX - state.canvas.panX, y: e.clientY - state.canvas.panY }
   })
-  vp.addEventListener('mouseup', () => { panning = false; panStart = null; dragging = null })
+  vp.addEventListener('mousemove', e => {
+    if (panning && panStart) { state.canvas.panX = e.clientX - panStart.x; state.canvas.panY = e.clientY - panStart.y; applyTransform() }
+  })
+  vp.addEventListener('mouseup', () => { panning = false; panStart = null })
   vp.addEventListener('wheel', e => { e.preventDefault(); state.canvas.zoom = Math.max(0.2, Math.min(3, state.canvas.zoom + (e.deltaY > 0 ? -0.08 : 0.08))); applyTransform() }, { passive: false })
+
   document.getElementById('zoom-in')?.addEventListener('click',  () => { state.canvas.zoom = Math.min(3, state.canvas.zoom + 0.1); applyTransform() })
   document.getElementById('zoom-out')?.addEventListener('click', () => { state.canvas.zoom = Math.max(0.2, state.canvas.zoom - 0.1); applyTransform() })
   document.getElementById('zoom-fit')?.addEventListener('click', canvasFit)
-  window._startNodeDrag = (e, id) => { const node = _canvasNodes.find(n => n.id === id); if (!node) return; dragging = { id, startX: e.clientX, startY: e.clientY, origX: node.x, origY: node.y } }
-}
 
-function buildCanvasNodes() {
-  if (!state.ui.activeTable) return []
-  const nodes = []; const src = state.tables[state.ui.activeTable]
-  nodes.push({ id: '__src__', x: 40, y: 60, label: state.ui.activeTable, icon: '\ud83d\udccb', color: '#5b8ef5', rowCount: src?.length || 0, summary: 'Source dataset' })
-  let prevData = [...(src || [])]
-  state.pipeline.forEach((step, i) => {
-    let out = prevData; try { out = step.fn(prevData) } catch(e) {}
-    const cat = OP_CATEGORIES.find(c => OPERATIONS.find(o => o.id === step.id)?.cat === c.id)
-    const saved = _canvasNodes.find(n => n.id === 'step_' + i)
-    nodes.push({ id: 'step_' + i, x: saved?.x ?? snap(40 + (i+1)*220), y: saved?.y ?? 60, label: step.label, icon: step.icon, color: cat?.color || '#22d3b8', rowCount: out?.length ?? 0, rowIn: prevData.length, summary: step.label })
-    prevData = out || prevData
-  })
-  nodes.forEach(n => { const s = _canvasNodes.find(x => x.id === n.id); if (s) { n.x = s.x; n.y = s.y } })
-  return nodes
+  // Legacy node drag (kept for v1 compatibility)
+  window._startNodeDrag = (e, id) => {
+    const node = _canvasNodes.find(n => n.id === id)
+    if (!node) return
+    const _drag = { id, startX: e.clientX, startY: e.clientY, origX: node.x, origY: node.y }
+    const move = ev => { node.x = snap(_drag.origX + (ev.clientX - _drag.startX) / state.canvas.zoom); node.y = snap(_drag.origY + (ev.clientY - _drag.startY) / state.canvas.zoom); const el = document.getElementById('cn-' + _drag.id); if (el) { el.style.left = node.x + 'px'; el.style.top = node.y + 'px' }; renderConnectors() }
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up) }
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up)
+  }
 }
 
 function renderCanvas() {
-  _canvasNodes = buildCanvasNodes()
-  const empty = document.getElementById('canvas-empty'); const nodesEl = document.getElementById('canvas-nodes')
-  if (!nodesEl) return
-  if (!_canvasNodes.length) { if (empty) empty.style.display = 'flex'; nodesEl.innerHTML = ''; return }
-  if (empty) empty.style.display = 'none'
-  applyTransform()
-  nodesEl.innerHTML = _canvasNodes.map(n => `<div class="cn-node" id="cn-${n.id}" style="left:${n.x}px;top:${n.y}px" onmousedown="window._startNodeDrag(event,'${n.id}')">
-    <div class="cn-port in"></div>
-    <div class="cn-head"><div class="cn-head-icon" style="background:${n.color}22;color:${n.color}">${n.icon}</div><div class="cn-head-label" title="${n.label}">${n.label}</div></div>
-    <div class="cn-body"><div class="cn-summary">${n.summary}</div></div>
-    <div class="cn-foot"><div class="cn-rowcount">${n.rowIn != null ? n.rowIn.toLocaleString() + ' \u2192 ' : ''}${n.rowCount.toLocaleString()} rows</div></div>
-    <div class="cn-port out"></div>
-  </div>`).join('')
-  renderConnectors()
+  // In Phase 2, this is called when switching to canvas — we hand off to renderAllP2Nodes
+  // Keep legacy renderCanvas for back-compat but it's a no-op now
 }
 
 function renderConnectors() {
@@ -600,14 +983,22 @@ function applyTransform() {
 }
 
 function canvasFit() {
-  if (!_canvasNodes.length) return
+  const allNodes = [
+    ..._canvasNodes,
+    ...Object.values(state.graph?.nodes || {})
+  ]
+  if (!allNodes.length) return
   const vp = document.getElementById('canvas-viewport'); const W=vp.clientWidth,H=vp.clientHeight
-  const minX=Math.min(..._canvasNodes.map(n=>n.x)),minY=Math.min(..._canvasNodes.map(n=>n.y))
-  const maxX=Math.max(..._canvasNodes.map(n=>n.x+180)),maxY=Math.max(..._canvasNodes.map(n=>n.y+88))
+  const minX=Math.min(...allNodes.map(n=>n.x)),minY=Math.min(...allNodes.map(n=>n.y))
+  const maxX=Math.max(...allNodes.map(n=>n.x+190)),maxY=Math.max(...allNodes.map(n=>n.y+88))
   state.canvas.zoom=Math.min(1,W/(maxX-minX+80),H/(maxY-minY+80))
   state.canvas.panX=(W-(maxX-minX)*state.canvas.zoom)/2; state.canvas.panY=(H-(maxY-minY)*state.canvas.zoom)/2
   applyTransform()
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Demo data
+// ─────────────────────────────────────────────────────────────────────────────
 
 function loadDemoData() {
   if (!window.Papa) { showToast('PapaParse not loaded yet', 'error'); return }

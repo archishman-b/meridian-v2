@@ -151,3 +151,206 @@ table.data-table tr:hover td{background:var(--surface2)}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:var(--text3)}
+/* ═══════════════════════════════════════════════════════════════
+   PHASE 2 CANVAS — appended to style.css
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Op drag */
+.op-btn[draggable="true"] { cursor: grab; }
+.op-btn[draggable="true"]:active { cursor: grabbing; }
+.op-btn.op-dragging { opacity: 0.45; transform: scale(0.97); }
+
+/* Canvas drop zone highlight */
+.canvas-drop-active {
+  outline: 2px dashed var(--accent);
+  outline-offset: -8px;
+  background: rgba(34,211,184,0.025) !important;
+}
+
+/* Port hover feedback */
+.p2-port-out {
+  cursor: crosshair !important;
+  transition: all .15s;
+  z-index: 10;
+}
+.p2-port-out:hover {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  transform: translateY(-50%) scale(1.5) !important;
+  box-shadow: 0 0 10px rgba(34,211,184,.5);
+}
+.p2-port-in {
+  cursor: default;
+  transition: all .15s;
+  z-index: 10;
+}
+.p2-port-in:hover {
+  background: var(--accent-bg) !important;
+  border-color: var(--accent) !important;
+  transform: translateY(-50%) scale(1.35) !important;
+}
+
+/* Node body — click to inspect */
+.p2-node-body {
+  cursor: pointer;
+  transition: background .1s;
+  position: relative;
+}
+.p2-node-body:hover {
+  background: var(--accent-bg);
+}
+.p2-node-body:hover::after {
+  content: 'inspect ↓';
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 9px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  pointer-events: none;
+}
+
+/* Canvas node delete button */
+.p2-node-del {
+  opacity: 0;
+  transition: opacity .1s;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text3);
+  font-size: 11px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.cn-node:hover .p2-node-del {
+  opacity: 1;
+}
+.p2-node-del:hover {
+  color: var(--danger) !important;
+}
+
+/* Inspector panel */
+#p2-inspector {
+  position: fixed;
+  bottom: 0;
+  left: 220px;   /* sidebar width */
+  right: 300px;  /* ops panel width */
+  height: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border-top: 2px solid var(--border);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  transition: height .25s cubic-bezier(.4,0,.2,1);
+  box-shadow: 0 -4px 24px rgba(0,0,0,.3);
+}
+#p2-inspector.open {
+  height: 320px;
+}
+.p2-insp-header {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface2);
+  flex-shrink: 0;
+  border-radius: 12px 12px 0 0;
+}
+.p2-insp-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  gap: 0;
+  min-height: 0;
+}
+.p2-insp-form-wrap {
+  width: 340px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 14px 16px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+.p2-insp-preview {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  min-width: 0;
+}
+.p2-insp-preview .table-wrap {
+  flex: 1;
+  overflow: auto;
+}
+
+/* Canvas mode context badge on modal */
+.canvas-mode-badge {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* Table items in sidebar are draggable in canvas mode */
+.table-item[draggable="true"] {
+  cursor: grab;
+}
+.table-item[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* Wire drag cursor overlay SVG — in canvas-transform */
+#wire-drag-svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 50;
+}
+
+/* Canvas empty state updated hint */
+#canvas-empty .empty-sub strong {
+  color: var(--accent);
+}
+
+/* ── SQL Preview Toggle ──────────────────────────────── */
+.sql-toggle {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 16px; padding: 8px 12px;
+  border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); cursor: pointer;
+  font-size: 11px; color: var(--text2);
+  font-family: var(--font-sans); width: 100%;
+  transition: all .15s; text-align: left;
+}
+.sql-toggle:hover { border-color: var(--border2); color: var(--text); }
+.sql-toggle .sql-arrow { margin-left: auto; transition: transform .15s; font-size: 9px; }
+.sql-toggle.open .sql-arrow { transform: rotate(180deg); }
+.sql-toggle.open { border-color: var(--accent-border); color: var(--accent); }
+
+.sql-panel {
+  display: none;
+  margin-top: 6px; padding: 12px 14px;
+  background: #1a1b2e;
+  border-radius: 6px; border: 1px solid #2a2a3e;
+  font-family: var(--font-mono); font-size: 11px;
+  color: #cdd6f4; line-height: 1.7;
+  white-space: pre-wrap; overflow-x: auto;
+}
+.sql-panel.open { display: block; }
+.sql-kw  { color: #89b4fa; font-weight: 600; }
+.sql-fn  { color: #a6e3a1; }
+.sql-str { color: #f9e2af; }
+.sql-cm  { color: #6c7086; font-style: italic; }
