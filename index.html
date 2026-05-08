@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meridian Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h5v4H2zm7 0h5v4H9zM2 9h5v4H2zm7 0h5v4H9z"/></svg>
+      </div>
+      <div>
+        <div class="brand-name">Meridian</div>
+        <div class="brand-module">Bridge</div>
+      </div>
+    </div>
+    <div class="topbar-privacy">
+      <span class="privacy-dot"></span>
+      Your data never leaves this browser
+    </div>
+    <nav class="topbar-nav" id="topbar-nav"></nav>
+  </header>
+
+  <div class="privacy-bar">
+    <span>&#8853;</span> Zero-server &middot; All computation is browser-side &middot; No upload, no tracking
+  </div>
+
+  <div class="pipeline-row" id="pipeline-row">
+    <span style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);flex-shrink:0">Pipeline</span>
+    <div id="pipeline-bar" style="display:flex;align-items:center;gap:6px;flex:1;overflow-x:auto;">
+      <span style="font-size:11px;color:var(--text3);font-style:italic">Load a dataset to begin</span>
+    </div>
+  </div>
+
+  <div class="app-body">
+
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        Tables
+        <span id="table-count" style="font-size:10px;padding:1px 6px;border-radius:10px;background:var(--surface2);color:var(--text2)">0</span>
+      </div>
+      <div class="table-list" id="table-list"></div>
+      <label class="upload-zone">
+        <input type="file" id="file-input" accept=".csv,.tsv,.xlsx,.xls" multiple />
+        <div style="font-size:20px;margin-bottom:4px">&#8853;</div>
+        <div style="font-weight:500;font-size:12px;color:var(--text2)">Load dataset</div>
+        <div style="margin-top:2px;font-size:11px">CSV &middot; TSV &middot; XLSX</div>
+      </label>
+      <button class="demo-btn" id="demo-btn">&#x2B21; Load demo data</button>
+    </aside>
+
+    <main class="workspace">
+
+      <div id="table-mode-view" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
+        <div class="preview-area" id="preview-area">
+          <div class="empty-state">
+            <div class="empty-icon">&#x2B21;</div>
+            <div class="empty-title">No data loaded</div>
+            <div class="empty-sub">Load a CSV or Excel file, or click Load demo data.</div>
+          </div>
+        </div>
+        <div class="stats-bar" id="stats-bar" style="display:none">
+          <span>Rows: <strong id="stat-rows">-</strong> of <strong id="stat-total">-</strong></span>
+          <span style="color:var(--border2)">|</span>
+          <span>Cols: <strong id="stat-cols">-</strong></span>
+          <span id="stat-aggregates" style="display:flex;gap:14px;align-items:center;margin-left:8px"></span>
+          <span style="margin-left:auto;font-size:10px;color:var(--text3)" id="stat-status">Ready</span>
+        </div>
+      </div>
+
+      <div id="canvas-mode-view" style="display:none;flex:1;position:relative;overflow:hidden;background:var(--bg)">
+        <div class="dot-grid"></div>
+        <div class="canvas-viewport" id="canvas-viewport">
+          <div class="canvas-transform" id="canvas-transform">
+            <svg class="canvas-svg" id="canvas-svg"></svg>
+            <div id="canvas-nodes"></div>
+          </div>
+        </div>
+        <div id="canvas-empty" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none">
+          <div style="font-size:32px;opacity:.15">&#9671;</div>
+          <div style="font-size:13px;font-weight:500;color:var(--text3)">Pipeline canvas</div>
+          <div style="font-size:11px;color:var(--text3);max-width:240px;text-align:center;line-height:1.6">Load a dataset and add operations to see them as connected nodes</div>
+        </div>
+        <div class="canvas-zoom-ctrl">
+          <button class="canvas-zoom-btn" id="zoom-out">&#8722;</button>
+          <span class="canvas-zoom-label" id="canvas-zoom-label">100%</span>
+          <button class="canvas-zoom-btn" id="zoom-in" style="border-left:1px solid var(--border2)">+</button>
+          <button class="canvas-zoom-btn" id="zoom-fit" style="border-left:1px solid var(--border2)">Fit</button>
+        </div>
+      </div>
+
+    </main>
+
+    <aside class="ops-panel">
+      <div class="ops-header">
+        <span style="font-size:12px;font-weight:600;flex:1">Operations</span>
+      </div>
+      <div class="ops-cats" id="ops-cats"></div>
+      <div class="ops-list" id="ops-list"></div>
+    </aside>
+
+  </div>
+
+</div>
+
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header" id="modal-header"></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modal-cancel">Cancel</button>
+      <button class="btn btn-primary" id="modal-apply">Apply</button>
+    </div>
+  </div>
+</div>
+
+<div class="audit-panel" id="audit-panel">
+  <div class="audit-header">
+    Audit log
+    <button class="btn btn-xs btn-secondary" id="audit-close">&#x2715;</button>
+  </div>
+  <div id="audit-entries"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
